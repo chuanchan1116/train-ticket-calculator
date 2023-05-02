@@ -3,11 +3,11 @@
 #!/usr/bin/env python3
 
 import logging
-import sys
 from dataclasses import dataclass
 
 import requests
-from rail_api_enum import TrainType
+
+from rail_api_enum import CabinClass, FareClass, TicketType, TrainType
 
 
 @dataclass
@@ -39,27 +39,49 @@ class TrainStations:
         return self._name_mapping[name]
 
 
+@dataclass
+class Fare:
+    def __init__(self, fare: dict) -> None:
+        self.ticket_type = TicketType(fare["TicketType"])
+        self.fare_class = FareClass(fare["FareClass"])
+        self.cabin_class = CabinClass(fare["CabinClass"])
+        self.price = fare["Price"]
+
+
 class RailApi:
     """Api Client for querying train information"""
 
-    api_url = "https://tdx.transportdata.tw/api/basic/"
+    api_url = "https://tdx.transportdata.tw/api/basic"
     auth_url = "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
 
-    def __init__(self) -> None:
-        self._get_auth()
+    def __init__(self, client_id: str, client_secret: str) -> None:
+        self._get_auth(client_id, client_secret)
         self._init_stations()
 
-    def _get_auth(self):
+    def _get_auth(self, client_id: str, client_secret: str):
         logging.debug("Authenticating...")
-        self.access_token = ""
+        res = requests.post(
+            self.auth_url,
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "client_credentials",
+            },
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        if not res.ok:
+            raise Exception(res.text)
+        self._access_token = res.json()["access_token"]
 
     def _init_stations(self):
         logging.debug("Getting Train Station Info")
 
         res = requests.get(
-            self.api_url + "v3/Rail/TRA/Station",
+            self.api_url + "/v3/Rail/TRA/Station",
             params={"$format": "json"},
             timeout=30,
+            headers={"authorization": f"Bearer {self._access_token}"},
         )
         if not res.ok:
             raise Exception(res.text)
@@ -73,7 +95,7 @@ class RailApi:
         """
         return self._train_station_list
 
-    def get_fares(self, sta1: TrainStation, sta2: TrainStation) -> list:
+    def get_fares(self, sta1: TrainStation, sta2: TrainStation) -> dict:
         """Get fare price between stations
 
         Args:
@@ -85,9 +107,9 @@ class RailApi:
         """
         res = requests.get(
             self.api_url
-            + f"v3/Rail/AFR/ODFare/{sta1.station_id}/to/{sta2.station_id}",
-            params={"$filter": "Direction eq 0"},
+            + f"/v3/Rail/TRA/ODFare/{sta1.station_id}/to/{sta2.station_id}",
             timeout=30,
+            headers={"authorization": f"Bearer {self._access_token}"},
         )
         if not res.ok:
             raise Exception(res.text)
@@ -106,8 +128,10 @@ class RailApi:
         Returns:
             list: Fare list
         """
-        return [
-            x
+
+        fares = [
+            x["Fares"]
             for x in self.get_fares(sta1, sta2)
             if x["TrainType"] == train_type
         ]
+        return [Fare(y) for x in fares for y in x]
