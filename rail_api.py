@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 
 import requests
+from time import time
 
 from rail_api_enum import CabinClass, FareClass, TicketType, TrainType
 
@@ -53,39 +54,63 @@ class RailApi:
 
     api_url = "https://tdx.transportdata.tw/api/basic"
     auth_url = "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
+    _auth_expiration = 0
+    _access_token = ""
 
     def __init__(self, client_id: str, client_secret: str) -> None:
-        self._get_auth(client_id, client_secret)
+        self._client_id = client_id
+        self._client_secret = client_secret
         self._init_stations()
 
-    def _get_auth(self, client_id: str, client_secret: str):
+    def _get_auth(self) -> str:
         logging.debug("Authenticating...")
-        res = requests.post(
-            self.auth_url,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "grant_type": "client_credentials",
-            },
-            headers={"content-type": "application/x-www-form-urlencoded"},
+        if not self._auth_expiration or self._auth_expiration <= time():
+            res = requests.post(
+                self.auth_url,
+                data={
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                    "grant_type": "client_credentials",
+                },
+                headers={"content-type": "application/x-www-form-urlencoded"},
+                timeout=30,
+            )
+            if not res.ok:
+                raise Exception(res.text)
+            self._access_token = res.json()["access_token"]
+            self._auth_expiration = time() + res.json()["expires_in"]
+        return self._access_token
+
+    def call(self, endpoint: str, params: dict | None = None) -> dict:
+        """Call API endpoint directly
+
+        Args:
+            endpoint (str): Endponit for API. Should start with `/`.
+            params (dict | None): Parameters when calling API.
+
+        Raises:
+            Exception: Response text if not OK.
+
+        Returns:
+            dict: Response JSON
+        """
+        api_url = "https://tdx.transportdata.tw/api/basic"
+        res = requests.get(
+            api_url + endpoint,
+            params=params,
             timeout=30,
+            headers={"authorization": f"Bearer {self._get_auth()}"},
         )
         if not res.ok:
             raise Exception(res.text)
-        self._access_token = res.json()["access_token"]
+        return res.json()
 
     def _init_stations(self):
+        endpoint = "/v3/Rail/TRA/Station"
         logging.debug("Getting Train Station Info")
 
-        res = requests.get(
-            self.api_url + "/v3/Rail/TRA/Station",
-            params={"$format": "json"},
-            timeout=30,
-            headers={"authorization": f"Bearer {self._access_token}"},
-        )
-        if not res.ok:
-            raise Exception(res.text)
-        self._train_station_list = TrainStations(res.json()["Stations"])
+        ret = self.call(endpoint, params={"$format": "json"})
+        self._train_station_list = TrainStations(ret["Stations"])
 
     def get_stations(self) -> TrainStations:
         """Get all station info
@@ -105,15 +130,11 @@ class RailApi:
         Returns:
             list: Return a list of price fare
         """
-        res = requests.get(
-            self.api_url
-            + f"/v3/Rail/TRA/ODFare/{sta1.station_id}/to/{sta2.station_id}",
-            timeout=30,
-            headers={"authorization": f"Bearer {self._access_token}"},
+        endpoint = (
+            f"/v3/Rail/TRA/ODFare/{sta1.station_id}/to/{sta2.station_id}"
         )
-        if not res.ok:
-            raise Exception(res.text)
-        return res.json()["ODFares"]
+        ret = self.call(endpoint)
+        return ret["ODFares"]
 
     def get_fares_by_type(
         self, sta1: TrainStation, sta2: TrainStation, train_type: TrainType
